@@ -1,0 +1,16 @@
+server:
+  port: 8083
+spring:
+  application:
+    name: expiry-worker
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+services:
+  reservation:
+    base-url: ${RESERVATION_SERVICE_URL:http://localhost:8081}
+stockguard:
+  expiry-poll-ms: ${EXPIRY_POLL_MS:5000}
+  expiry-initial-delay-ms: ${EXPIRY_INITIAL_DELAY_MS:5000}

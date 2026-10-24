@@ -1,0 +1,23 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: campaign-service
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/campaigns}
+    username: ${DATABASE_USERNAME:stockguard}
+    password: ${DATABASE_PASSWORD:stockguard}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+services:
+  reservation:
+    base-url: ${RESERVATION_SERVICE_URL:http://localhost:8081}

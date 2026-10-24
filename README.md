@@ -2,14 +2,14 @@
 
 **Zero Oversell Commerce** is a portfolio system design and implementation for flash-sale commerce. Its core goal is to ensure that simultaneous purchase requests never reserve more units than the campaign has available.
 
-The repository is organized as independently deployable services. The first runnable implementation is the reservation service; the other service directories describe planned boundaries and will be implemented as the portfolio grows.
+The repository is organized as independently deployable services. Campaign, reservation, payment, and expiry services are connected in the local compose environment. The payment provider is simulated for the portfolio flow.
 
 ## Technology stack
 
 - Java 21
 - Spring Boot 3.5.x
 - PostgreSQL as the source of truth for inventory and reservations
-- Redis for admission control and fast quota screening
+- Redis included in the local stack for the planned admission-control layer
 - Apache Kafka for asynchronous payment and expiry workflows
 - Flyway for schema migrations
 - Docker Compose for local infrastructure
@@ -54,42 +54,40 @@ Java reserves `const` as a keyword, so the valid Java package name is `constants
 
 ```mermaid
 flowchart LR
-  Client[Customer App] --> Gateway[API Gateway / Rate Limiting]
-  Gateway --> Campaign[Campaign Service]
-  Gateway --> Reservation[Reservation Service]
-  Reservation --> Redis[(Redis Admission Control)]
-  Reservation --> PG[(PostgreSQL Inventory, Reservations, Outbox)]
-  PG --> Publisher[Outbox Publisher]
-  Publisher --> Kafka[[Kafka]]
-  Kafka --> Payment[Payment / VA Service]
-  Payment --> Provider[Payment Provider]
-  Provider --> Webhook[Payment Webhook Handler]
-  Webhook --> Kafka
-  Kafka --> StateWorker[Reservation State Consumer]
-  Kafka --> Expiry[Expiry Worker]
-  Expiry --> PG
-  PG --> Reconcile[Reconciliation Job]
-  Reconcile --> Observe[Metrics, Alerts, Dashboard]
+  Client[Customer / API Client] --> Campaign[Campaign Service]
+  Campaign -->|Provision stock and price| Reservation[Reservation Service]
+  Client --> Reservation
+  Reservation --> RDB[(Reservations PostgreSQL)]
+  RDB --> ROutbox[Reservation Outbox]
+  ROutbox -->|reservation.created| Kafka[[Kafka]]
+  Kafka --> Payment[Payment Service]
+  Payment --> PDB[(Payments PostgreSQL)]
+  Client -->|Demo confirm| Payment
+  PDB --> POutbox[Payment Outbox]
+  POutbox -->|payment.confirmed| Kafka
+  Kafka -->|confirm reservation| Reservation
+  Reservation -->|payment accepted/rejected, expired| Kafka
+  Kafka -->|update payment state| Payment
+  Expiry[Expiry Worker] -->|Poll due items| Reservation
+  Reservation --> CDB[(Campaigns PostgreSQL)]
 ```
 
 ### Service responsibilities
 
 | Service | Responsibility | Data ownership |
 |---|---|---|
-| Campaign Service | Campaign schedule, product, price, and initial quota | Campaign database |
+| Campaign Service | Campaign metadata and initial quota; provisions stock and locked price | Campaign database |
 | Reservation Service | Idempotent reservation API and atomic inventory reservation | PostgreSQL inventory, reservations, and outbox |
-| Payment Service | Payment intent / VA creation and provider callback verification | Payment database |
-| Expiry Worker | Expire unpaid reservations and release inventory exactly once | Reservation API/events; no direct cross-service table access |
-| Reconciliation Job | Compare inventory, reservations, and payment outcomes; emit alerts | Read-only service APIs or exported events |
+| Payment Service | Consumes reservation event, creates demo VA, and emits payment confirmation | Payment database and outbox |
+| Expiry Worker | Polls Reservation Service to expire due reservations and release inventory | No direct cross-service table access |
 
-Each service owns its data. Other services communicate through APIs or Kafka events rather than querying another service's tables.
+Each stateful service owns a separate PostgreSQL database. Other services communicate through HTTP or Kafka events rather than querying another service's tables.
 
 ### Purchase flow
 
-1. The client sends a reservation request with an `Idempotency-Key`.
-2. The gateway authenticates the caller and applies rate limits.
-3. Redis may provide a fast admission check, but it does not authorize the final sale.
-4. Reservation Service starts a PostgreSQL transaction and executes a conditional stock decrement:
+1. Campaign Service creates campaign metadata and synchronously provisions its stock and locked unit price in Reservation Service.
+2. The client sends a reservation request with an `Idempotency-Key`.
+3. Reservation Service starts a PostgreSQL transaction and executes a conditional stock decrement:
 
    ```sql
    UPDATE flash_stock
@@ -97,11 +95,10 @@ Each service owns its data. Other services communicate through APIs or Kafka eve
    WHERE sale_id = :sale_id AND qty > 0;
    ```
 
-5. One affected row means the unit was reserved. Zero rows means stock is unavailable. The reservation row and an outbox event commit in the same transaction.
-6. The outbox publisher sends `ReservationCreated` to Kafka. Payment Service creates a short-lived VA and records its provider reference.
-7. The payment provider calls the webhook endpoint. The callback is verified and deduplicated before a payment event is published.
-8. A state consumer moves the reservation to `PAID`. If its TTL expires first, Expiry Worker conditionally moves it from `PENDING_PAYMENT` to `EXPIRED` and releases one unit.
-9. Reconciliation checks for mismatches and pages the operator when a campaign invariant is violated.
+4. One affected row means the unit was reserved. Zero rows means stock is unavailable. The reservation row and an outbox event commit in the same transaction.
+5. The outbox publisher sends `reservation.created` to Kafka. Payment Service consumes it and creates a demo VA record with a matching amount, currency, and expiry.
+6. The demo confirm endpoint moves payment to `CONFIRMATION_PENDING` and writes `payment.confirmed` to the payment outbox. Reservation Service checks the deadline and current state, then emits an accepted or rejected decision. Payment Service applies that decision to its local payment status.
+7. Expiry Worker periodically asks Reservation Service to expire due reservations. A conditional status transition releases stock once; payment and expiry cannot both win.
 
 ### Consistency and failure handling
 
@@ -111,26 +108,29 @@ Each service owns its data. Other services communicate through APIs or Kafka eve
 - The transactional outbox prevents a committed reservation from losing its event if Kafka is temporarily unavailable.
 - Kafka consumers are idempotent because messages may be delivered more than once.
 - Payment and expiry transitions use conditional state changes so only one transition can claim the reservation.
-- Redis is an optimization. If it is unavailable, admission can degrade to gateway throttling and database protection, subject to database capacity.
+- Redis is provisioned by Compose but is not wired into the current request path yet. PostgreSQL remains the sole stock authority in this implementation.
 
 More detail is in [the architecture design](docs/architecture/high-level-design.md), [the API contract](docs/api/reservations.md), and [the design decisions](docs/decisions/0001-postgresql-is-inventory-authority.md).
 
 ## Run locally
 
-Start PostgreSQL, Redis, and Kafka:
+Build and start PostgreSQL, Redis, Kafka, and all four applications:
 
 ```bash
-docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml up --build -d
 ```
 
-Run the reservation API:
+Build all four Java services with the root Maven reactor: `mvn -B -DskipTests package`.
+
+Create a campaign (this provisions its stock in Reservation Service):
 
 ```bash
-cd services/reservation-service
-mvn spring-boot:run
+curl -X POST http://localhost:8080/api/v1/campaigns \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Live Flash Sale","unitPrice":125000,"currency":"IDR","quantity":100}'
 ```
 
-Create a reservation:
+Use the returned `campaignId` to reserve one unit:
 
 ```http
 POST http://localhost:8081/api/v1/reservations
@@ -138,12 +138,14 @@ Idempotency-Key: checkout-001
 Content-Type: application/json
 
 {
-  "saleId": "00000000-0000-0000-0000-000000000100",
+  "saleId": "<campaignId from previous response>",
   "customerId": "00000000-0000-0000-0000-000000000201"
 }
 ```
 
-The local migration seeds a demo campaign with 100 units. Health endpoint: `GET http://localhost:8081/actuator/health`.
+The reservation response contains `reservationId`. After the Kafka consumer creates the payment, inspect it with `GET http://localhost:8082/api/v1/payments/{reservationId}`. For this local demo only, confirm payment with `POST http://localhost:8082/api/v1/payments/{reservationId}/demo-confirm`. Poll the reservation and payment lookups until both show `PAID`. To exercise expiry, create a fresh campaign/reservation and let the configured reservation TTL elapse; the expiry worker polls every five seconds.
+
+Health endpoints: `http://localhost:8080/actuator/health`, `8081/actuator/health`, `8082/actuator/health`, and `8083/actuator/health`.
 
 ## Validation scenario
 
@@ -151,4 +153,4 @@ The portfolio load-test target is 250,000 concurrent attempts for 100 units. Acc
 
 ## Current implementation scope
 
-The reservation API and PostgreSQL migration are the initial vertical slice. Redis admission, Kafka outbox publishing, payment integration, expiry processing, reconciliation, dashboards, and load testing are architecture targets and are not yet wired into the application.
+The local end-to-end flow includes campaign provisioning over HTTP, atomic reservation in PostgreSQL, a transactional outbox to Kafka, demo payment intent creation, payment confirmation back through Kafka, and scheduled expiry with stock release. Redis admission control, a real payment provider, authentication between internal services, reconciliation automation, dashboards, and the 250,000-request load test remain follow-up work.

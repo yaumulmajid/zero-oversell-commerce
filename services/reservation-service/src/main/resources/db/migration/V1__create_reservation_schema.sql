@@ -1,6 +1,8 @@
 CREATE TABLE flash_stock (
     sale_id UUID PRIMARY KEY,
-    qty INTEGER NOT NULL CHECK (qty >= 0)
+    qty INTEGER NOT NULL CHECK (qty >= 0),
+    unit_price NUMERIC(12, 2) NOT NULL CHECK (unit_price > 0),
+    currency VARCHAR(3) NOT NULL
 );
 
 CREATE TABLE reservations (
@@ -17,6 +19,14 @@ CREATE TABLE reservations (
 CREATE INDEX idx_reservations_pending_expiry ON reservations (expires_at)
     WHERE status = 'PENDING_PAYMENT';
 
--- Demo campaign; replace with campaign-service provisioning in a multi-service deployment.
-INSERT INTO flash_stock (sale_id, qty)
-VALUES ('00000000-0000-0000-0000-000000000100', 100);
+CREATE TABLE outbox_events (
+    id UUID PRIMARY KEY,
+    topic VARCHAR(128) NOT NULL,
+    message_key VARCHAR(128) NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    published_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_outbox_events_pending ON outbox_events (created_at)
+    WHERE published_at IS NULL;

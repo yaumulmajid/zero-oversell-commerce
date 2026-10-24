@@ -1,3 +1,3 @@
 # Payment Service
 
-Planned service. Owns payment intent and VA provider integration, verifies callbacks, and emits payment events. See [high level design](../../docs/architecture/high-level-design.md).
+Consumes `reservation.created`, creates an idempotent demo VA record, and exposes payment lookup and a demo confirmation endpoint. Confirmation is published through the payment outbox as `payment.confirmed`, which Reservation Service consumes. Replace the demo callback with a signed provider adapter for a real payment integration.

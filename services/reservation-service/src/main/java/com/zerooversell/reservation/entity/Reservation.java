@@ -45,4 +45,16 @@ public class Reservation {
     public UUID getCustomerId() { return customerId; }
     public ReservationStatus getStatus() { return status; }
     public Instant getExpiresAt() { return expiresAt; }
+
+    public boolean markPaid() {
+        if (status != ReservationStatus.PENDING_PAYMENT) return false;
+        status = ReservationStatus.PAID;
+        return true;
+    }
+
+    public boolean expire() {
+        if (status != ReservationStatus.PENDING_PAYMENT) return false;
+        status = ReservationStatus.EXPIRED;
+        return true;
+    }
 }

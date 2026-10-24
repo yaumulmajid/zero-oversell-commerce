@@ -1,0 +1,3 @@
+CREATE DATABASE campaigns;
+CREATE DATABASE reservations;
+CREATE DATABASE payments;
