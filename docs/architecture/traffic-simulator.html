@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zero Oversell Commerce Traffic Simulator</title>
+  <style>
+    :root { color-scheme: dark; --bg:#09111f; --surface:#101d31; --surface-2:#14253e; --line:#294364; --text:#eef6ff; --muted:#a8bad1; --cyan:#4adee8; --green:#51e39b; --amber:#fbbf24; --red:#fb7185; --purple:#a78bfa; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:radial-gradient(circle at 20% 0%,#153359 0%,var(--bg) 40%); color:var(--text); font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif; }
+    main { max-width:1180px; margin:auto; padding:32px 20px 48px; }
+    h1 { margin:0; font-size:clamp(26px,4vw,42px); letter-spacing:-.04em; }
+    .intro { margin:8px 0 28px; color:var(--muted); max-width:720px; }
+    .grid { display:grid; grid-template-columns:300px 1fr; gap:18px; }
+    .panel { background:linear-gradient(145deg,rgba(20,37,62,.95),rgba(13,26,45,.95)); border:1px solid var(--line); border-radius:16px; padding:18px; box-shadow:0 18px 50px rgba(0,0,0,.2); }
+    h2 { font-size:14px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0 0 16px; }
+    label { display:block; font-size:13px; color:var(--muted); margin-top:16px; }
+    input[type=range] { accent-color:var(--cyan); width:100%; margin:10px 0 2px; }
+    .value { color:var(--cyan); float:right; font-variant-numeric:tabular-nums; }
+    .buttons { display:flex; gap:8px; margin-top:22px; }
+    button { border:1px solid var(--line); border-radius:9px; background:#192d49; color:var(--text); padding:9px 12px; font:inherit; cursor:pointer; }
+    button.primary { background:linear-gradient(120deg,#0c7187,#106b72); border-color:#28b5c5; }
+    button:focus-visible, input:focus-visible { outline:3px solid var(--amber); outline-offset:2px; }
+    .legend { display:grid; gap:9px; margin-top:24px; color:var(--muted); font-size:13px; }
+    .dot { width:10px; height:10px; display:inline-block; border-radius:50%; margin-right:8px; }
+    .diagram { position:relative; min-height:510px; overflow:hidden; background:linear-gradient(180deg,rgba(9,17,31,.3),rgba(9,17,31,.8)); }
+    .pipes { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+    .pipe { stroke:#345271; stroke-width:2; fill:none; }
+    .node { position:absolute; width:142px; min-height:60px; border:1px solid #3b5877; border-radius:11px; display:grid; place-items:center; padding:8px; text-align:center; background:#112540; font-size:13px; font-weight:600; }
+    .node small { display:block; color:var(--muted); font-size:11px; font-weight:400; margin-top:2px; }
+    .client { top:210px; left:4%; border-color:#4595ba; } .gateway { top:210px; left:27%; } .reservation { top:120px; left:50%; border-color:#44a8b8; } .postgres { top:34px; left:74%; border-color:#5279d5; } .kafka { top:310px; left:50%; border-color:#9a75e9; } .payment { top:310px; left:74%; border-color:#42b980; } .expiry { top:407px; left:26%; border-color:#e5a72f; }
+    .packet { position:absolute; width:11px; height:11px; border-radius:99px; box-shadow:0 0 14px currentColor; pointer-events:none; transform:translate(-50%,-50%); }
+    .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:18px; }
+    .metric { background:rgba(16,29,49,.85); border:1px solid var(--line); border-radius:12px; padding:13px; }
+    .metric span { display:block; color:var(--muted); font-size:12px; } .metric strong { font-size:24px; font-variant-numeric:tabular-nums; }
+    .foot { color:var(--muted); font-size:12px; margin-top:18px; }
+    @media (max-width:760px) { .grid{grid-template-columns:1fr}.diagram{min-height:560px}.node{width:108px;font-size:11px}.client{left:2%}.gateway{left:23%}.reservation{left:48%}.postgres{left:72%}.kafka{left:48%}.payment{left:72%}.expiry{left:21%}.metrics{grid-template-columns:repeat(2,1fr)} }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Zero Oversell Commerce</h1>
+    <p class="intro">A live traffic simulation of the flash-sale reservation path. Raise demand above stock and observe that PostgreSQL accepts only the available quota.</p>
+    <div class="grid">
+      <section class="panel" aria-label="Simulation controls">
+        <h2>Traffic controls</h2>
+        <label for="stock">Campaign quota <output class="value" id="stockValue">100</output></label>
+        <input id="stock" type="range" min="10" max="500" value="100" step="10">
+        <label for="traffic">Requests per burst <output class="value" id="trafficValue">250</output></label>
+        <input id="traffic" type="range" min="10" max="1000" value="250" step="10">
+        <label for="retry">Duplicate retry rate <output class="value" id="retryValue">8%</output></label>
+        <input id="retry" type="range" min="0" max="40" value="8" step="1">
+        <div class="buttons"><button class="primary" id="run" type="button">Run burst</button><button id="reset" type="button">Reset</button></div>
+        <div class="legend"><span><i class="dot" style="background:var(--cyan)"></i>Reservation request</span><span><i class="dot" style="background:var(--green)"></i>Accepted reservation</span><span><i class="dot" style="background:var(--red)"></i>Rejected after quota is full</span><span><i class="dot" style="background:var(--purple)"></i>Asynchronous payment event</span></div>
+      </section>
+      <section class="panel diagram" id="diagram" aria-label="Animated architecture traffic diagram">
+        <svg class="pipes" viewBox="0 0 1000 560" preserveAspectRatio="none" aria-hidden="true">
+          <path class="pipe" d="M180 240 H270"/><path class="pipe" d="M430 240 L510 150"/><path class="pipe" d="M650 150 H740"/><path class="pipe" d="M650 150 V340"/><path class="pipe" d="M650 340 H740"/><path class="pipe" d="M430 450 L510 350"/>
+        </svg>
+        <div class="node client">Customer App<small>checkout burst</small></div><div class="node gateway">Gateway<small>rate limit</small></div><div class="node reservation">Reservation Service<small>atomic stock update</small></div><div class="node postgres">PostgreSQL<small>inventory authority</small></div><div class="node kafka">Kafka + Outbox<small>reliable events</small></div><div class="node payment">Payment Service<small>VA workflow</small></div><div class="node expiry">Expiry Worker<small>release expired stock</small></div>
+      </section>
+    </div>
+    <section class="metrics" aria-live="polite">
+      <div class="metric"><span>Available stock</span><strong id="available">100</strong></div><div class="metric"><span>Accepted</span><strong id="accepted">0</strong></div><div class="metric"><span>Rejected</span><strong id="rejected">0</strong></div><div class="metric"><span>Duplicate retries ignored</span><strong id="deduped">0</strong></div>
+    </section>
+    <p class="foot">Model: conditional inventory update plus idempotency key. This is an architecture explainer, not a benchmark or production telemetry.</p>
+  </main>
+  <script>
+    const byId = id => document.getElementById(id);
+    const controls = { stock:byId('stock'), traffic:byId('traffic'), retry:byId('retry') };
+    const labels = { stock:byId('stockValue'), traffic:byId('trafficValue'), retry:byId('retryValue') };
+    const metrics = { available:byId('available'), accepted:byId('accepted'), rejected:byId('rejected'), deduped:byId('deduped') };
+    const state = { available:100, accepted:0, rejected:0, deduped:0, busy:false };
+    function display() { labels.stock.textContent=controls.stock.value; labels.traffic.textContent=controls.traffic.value; labels.retry.textContent=controls.retry.value+'%'; Object.entries(metrics).forEach(([key,el])=>el.textContent=state[key]); }
+    function packet(color, duration, path) { const el=document.createElement('i'); el.className='packet'; el.style.color=color; el.style.background=color; byId('diagram').append(el); const start=performance.now(); function move(now){ const t=Math.min((now-start)/duration,1); const p=path(t); el.style.left=p[0]+'%'; el.style.top=p[1]+'px'; if(t<1) requestAnimationFrame(move); else el.remove(); } requestAnimationFrame(move); }
+    function route(points,color,duration=700) { packet(color,duration,t=>{ const index=Math.min(Math.floor(t*(points.length-1)),points.length-2); const p=(t*(points.length-1))-index; const a=points[index], b=points[index+1]; return [a[0]+(b[0]-a[0])*p,a[1]+(b[1]-a[1])*p]; }); }
+    function run() { if(state.busy) return; state.busy=true; const attempts=Number(controls.traffic.value), retryRate=Number(controls.retry.value)/100; let unique=Math.round(attempts*(1-retryRate)), retries=attempts-unique, grant=Math.min(unique,state.available), decline=unique-grant; state.available-=grant; state.accepted+=grant; state.rejected+=decline; state.deduped+=retries; display(); const sample=Math.min(26,attempts); for(let i=0;i<sample;i++){ const accepted=i<Math.round(sample*(grant/Math.max(unique,1))); const delay=i*22; setTimeout(()=>{ route([[12,240],[34,240],[57,150]],accepted?'var(--cyan)':'var(--red)',620); if(accepted){ setTimeout(()=>route([[57,150],[81,70]],'var(--green)',460),300); setTimeout(()=>route([[57,150],[57,340],[81,340]],'var(--purple)',640),470); } },delay); } setTimeout(()=>state.busy=false,1100); }
+    Object.entries(controls).forEach(([key,control])=>control.addEventListener('input',()=>{ if(key==='stock' && state.accepted===0) state.available=Number(control.value); display(); }));
+    byId('run').addEventListener('click',run); byId('reset').addEventListener('click',()=>{ state.available=Number(controls.stock.value); state.accepted=state.rejected=state.deduped=0; display(); }); display();
+  </script>
+</body>
+</html>

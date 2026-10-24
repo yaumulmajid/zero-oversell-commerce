@@ -1,8 +1,17 @@
 # Zero Oversell Commerce
 
-**Zero Oversell Commerce** is a portfolio system design and implementation for flash-sale commerce. Its core goal is to ensure that simultaneous purchase requests never reserve more units than the campaign has available.
+> Flash-sale microservices in Java 21 and Spring Boot that protect inventory from overselling under concurrent checkout traffic.
 
-The repository is organized as independently deployable services. Campaign, reservation, payment, and expiry services are connected in the local compose environment. The payment provider is simulated for the portfolio flow.
+[![Java 21](https://img.shields.io/badge/Java-21-437291?logo=openjdk&logoColor=white)](https://openjdk.org/projects/jdk/21/)
+[![Spring Boot 3.5](https://img.shields.io/badge/Spring%20Boot-3.5-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-event--driven-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+
+Zero Oversell Commerce is a portfolio implementation of a high-contention flash-sale checkout path. Campaign, reservation, payment, and expiry services run together locally; the payment provider is intentionally simulated.
+
+## See traffic move through the system
+
+Open the [interactive traffic simulator](https://yaumulmajid.github.io/zero-oversell-commerce/) to change quota, burst volume, and retry rate. It shows why a conditional PostgreSQL update accepts only the available inventory, even when demand exceeds stock. The source lives in [docs/architecture/traffic-simulator.html](docs/architecture/traffic-simulator.html).
 
 ## Technology stack
 
@@ -50,26 +59,56 @@ com.zerooversell.reservation/
 
 Java reserves `const` as a keyword, so the valid Java package name is `constants`.
 
-## Architecture
+## Architecture at a glance
 
 ```mermaid
 flowchart LR
-  Client[Customer / API Client] --> Campaign[Campaign Service]
-  Campaign -->|Provision stock and price| Reservation[Reservation Service]
-  Client --> Reservation
-  Reservation --> RDB[(Reservations PostgreSQL)]
-  RDB --> ROutbox[Reservation Outbox]
-  ROutbox -->|reservation.created| Kafka[[Kafka]]
-  Kafka --> Payment[Payment Service]
-  Payment --> PDB[(Payments PostgreSQL)]
-  Client -->|Demo confirm| Payment
-  PDB --> POutbox[Payment Outbox]
-  POutbox -->|payment.confirmed| Kafka
-  Kafka -->|confirm reservation| Reservation
-  Reservation -->|payment accepted/rejected, expired| Kafka
-  Kafka -->|update payment state| Payment
-  Expiry[Expiry Worker] -->|Poll due items| Reservation
-  Reservation --> CDB[(Campaigns PostgreSQL)]
+  Client([Customer App]) -->|create campaign| Campaign[Campaign Service]
+  Campaign -->|provision quota and price| Reservation[Reservation Service]
+  Client -->|reserve with Idempotency-Key| Reservation
+  Reservation -->|conditional decrement| RDB[(Reservations DB)]
+  Reservation -->|transactional outbox| Kafka{{Kafka}}
+  Kafka -->|reservation.created| Payment[Payment Service]
+  Payment --> PDB[(Payments DB)]
+  Client -->|demo confirmation| Payment
+  Payment -->|payment.confirmed| Kafka
+  Kafka -->|accept or reject payment| Reservation
+  Reservation -->|payment decision and expiry| Kafka
+  Kafka -->|update local payment state| Payment
+  Expiry[Expiry Worker] -->|expire due reservations| Reservation
+  Campaign --> CDB[(Campaigns DB)]
+  classDef service fill:#102a43,stroke:#38bdf8,color:#e0f2fe,stroke-width:2px
+  classDef database fill:#172554,stroke:#818cf8,color:#e0e7ff,stroke-width:2px
+  classDef event fill:#31165c,stroke:#c084fc,color:#f3e8ff,stroke-width:2px
+  class Client,Campaign,Reservation,Payment,Expiry service
+  class RDB,PDB,CDB database
+  class Kafka event
+```
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Customer
+  participant C as Campaign Service
+  participant R as Reservation Service
+  participant DB as PostgreSQL
+  participant K as Kafka
+  participant P as Payment Service
+  U->>C: Create campaign with quota
+  C->>R: Provision inventory and locked price
+  U->>R: Reserve with Idempotency-Key
+  R->>DB: UPDATE stock WHERE qty > 0
+  DB-->>R: One row changed
+  R->>DB: Persist reservation and outbox event
+  R-->>U: PENDING_PAYMENT + expiry time
+  R->>K: reservation.created
+  K->>P: Create demo VA
+  U->>P: Confirm demo payment
+  P->>K: payment.confirmed
+  K->>R: Confirm reservation
+  R->>DB: Move PENDING_PAYMENT to PAID
+  R->>K: payment-accepted
+  K->>P: Mark payment PAID
 ```
 
 ### Service responsibilities
@@ -83,11 +122,11 @@ flowchart LR
 
 Each stateful service owns a separate PostgreSQL database. Other services communicate through HTTP or Kafka events rather than querying another service's tables.
 
-### Purchase flow
+### Why it does not oversell
 
-1. Campaign Service creates campaign metadata and synchronously provisions its stock and locked unit price in Reservation Service.
-2. The client sends a reservation request with an `Idempotency-Key`.
-3. Reservation Service starts a PostgreSQL transaction and executes a conditional stock decrement:
+1. Campaign Service provisions a fixed quota and locked price in Reservation Service.
+2. Reservation Service receives checkout requests with an `Idempotency-Key`.
+3. It runs this PostgreSQL operation inside the same transaction that creates the reservation and outbox event:
 
    ```sql
    UPDATE flash_stock
@@ -95,10 +134,10 @@ Each stateful service owns a separate PostgreSQL database. Other services commun
    WHERE sale_id = :sale_id AND qty > 0;
    ```
 
-4. One affected row means the unit was reserved. Zero rows means stock is unavailable. The reservation row and an outbox event commit in the same transaction.
-5. The outbox publisher sends `reservation.created` to Kafka. Payment Service consumes it and creates a demo VA record with a matching amount, currency, and expiry.
-6. The demo confirm endpoint moves payment to `CONFIRMATION_PENDING` and writes `payment.confirmed` to the payment outbox. Reservation Service checks the deadline and current state, then emits an accepted or rejected decision. Payment Service applies that decision to its local payment status.
-7. Expiry Worker periodically asks Reservation Service to expire due reservations. A conditional status transition releases stock once; payment and expiry cannot both win.
+4. Exactly one updated row reserves a unit. No updated row means sold out. The database constraint also prevents negative inventory.
+5. The outbox sends `reservation.created` to Kafka. Payment Service creates a demo VA record using the locked amount, currency, and expiry.
+6. Payment confirmation returns by Kafka. Reservation Service owns the final state decision, protecting the payment-versus-expiry race.
+7. Expiry Worker calls Reservation Service for due items. Only a successful `PENDING_PAYMENT → EXPIRED` transition releases a unit.
 
 ### Consistency and failure handling
 
